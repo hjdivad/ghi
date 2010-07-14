@@ -1,5 +1,6 @@
 require "net/http"
 require "yaml"
+require "cgi"
 
 class GHI::API
   class InvalidRequest < StandardError
@@ -11,13 +12,14 @@ class GHI::API
   class ResponseError < StandardError
   end
 
-  API_URL = "http://github.com/api/v2/yaml/issues/:action/:user/:repo"
+  API_HOST  = "github.com"
+  API_PATH  = "/api/v2/yaml/issues/:action/:user/:repo"
 
   attr_reader :user, :repo
 
-  def initialize(user, repo)
+  def initialize(user, repo, use_ssl=false)
     raise InvalidConnection if user.nil? || repo.nil?
-    @user, @repo = user, repo
+    @user, @repo, @use_ssl = user, repo, use_ssl
   end
 
   def search(term, state = :open)
@@ -64,7 +66,19 @@ class GHI::API
   private
 
   def get(*args)
-    res = YAML.load Net::HTTP.get(URI.parse(url(*args) + auth(true)))
+    http = Net::HTTP.new( API_HOST, @use_ssl ? 443 : 80 )
+    http.use_ssl = true if @use_ssl
+    res = nil
+    http.start do
+      if @use_ssl
+        req = Net::HTTP::Post.new( url_path( *args ))
+        req.body = "login=#{auth["login"]}&token=#{auth["token"]}"
+      else
+        req = Net::HTTP::Get.new( url_path( *args ) + auth(true))
+      end
+      res = YAML.load http.request( req ).body
+    end
+
     raise ResponseError, errors(res) if res["error"]
     res
   rescue ArgumentError, URI::InvalidURIError
@@ -75,8 +89,17 @@ class GHI::API
 
   def post(*args)
     params = args.last.is_a?(Hash) ? args.pop : {}
-    params.update auth
-    res = YAML.load Net::HTTP.post_form(URI.parse(url(*args)), params).body
+
+    http = Net::HTTP.new( API_HOST, @use_ssl ? 443 : 80 )
+    http.use_ssl = true if @use_ssl
+    res = nil
+    http.start do
+      req = Net::HTTP::Post.new( url_path( *args ))
+      params.update auth
+      req.body = params.map{|k,v| "#{CGI.escape k}=#{CGI.escape v}"}.join("&")
+      res = YAML.load http.request( req ).body
+    end
+
     raise ResponseError, errors(res) if res["error"]
     res
   rescue ArgumentError, URI::InvalidURIError
@@ -97,9 +120,9 @@ class GHI::API
     end
   end
 
-  def url(action, *args)
-    @url ||= API_URL.sub(":user", user).sub(":repo", repo)
-    uri  = @url.sub ":action", action.to_s
+  def url_path(action, *args)
+    @url_path ||= API_PATH.sub(":user", user).sub(":repo", repo)
+    uri  = @url_path.sub ":action", action.to_s
     uri += "/#{args.join("/")}" unless args.empty?
     uri
   end
